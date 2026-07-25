@@ -1,0 +1,218 @@
+name: OTA patch release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+concurrency:
+  group: propresenter-ota-patch-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  detect:
+    name: Detect a new sample build
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.probe.outputs.changed }}
+      build_number: ${{ steps.probe.outputs.build_number }}
+      version: ${{ steps.probe.outputs.version }}
+      download_url: ${{ steps.probe.outputs.download_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Probe the discovered OTA API
+        id: probe
+        shell: bash
+        env:
+          OTA_API_BASE: ${{ vars.PROPRES_OTA_API_BASE }}
+          OTA_DOWNLOAD_HOSTS: ${{ vars.PROPRES_DOWNLOAD_HOSTS }}
+          OTA_HEADERS_JSON: ${{ secrets.PROPRES_OTA_HEADERS_JSON }}
+        run: |
+          set -euo pipefail
+          args=(
+            --state-file state/ota-state.json
+            --result-file ota-result.json
+            --next-state-file ota-next-state.json
+            --github-output "$GITHUB_OUTPUT"
+          )
+          if [[ -n "${OTA_API_BASE:-}" ]]; then
+            args+=(--api-base "$OTA_API_BASE")
+          fi
+          if [[ -n "${OTA_DOWNLOAD_HOSTS:-}" ]]; then
+            IFS=',' read -ra hosts <<< "$OTA_DOWNLOAD_HOSTS"
+            for host in "${hosts[@]}"; do
+              args+=(--allowed-download-host "$host")
+            done
+          fi
+          if [[ -n "${OTA_HEADERS_JSON:-}" ]]; then
+            args+=(--headers-json "$OTA_HEADERS_JSON")
+          fi
+          python3 ota_probe.py "${args[@]}"
+
+      - name: Preserve probe metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ota-probe-${{ github.run_id }}
+          path: |
+            ota-result.json
+            ota-next-state.json
+          if-no-files-found: error
+
+  patch:
+    name: Extract and patch the new build
+    if: needs.detect.outputs.changed == 'true'
+    needs: detect
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Pixi
+        uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          pixi-version: v0.70.2
+          cache: true
+
+      - name: Prepare latest innoextract fork
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pixi run python setup_innoextract.py `
+            --output-dir tools\innoextract-win
+
+      - name: Download installer returned by the API
+        shell: pwsh
+        env:
+          DOWNLOAD_URL: ${{ needs.detect.outputs.download_url }}
+          INSTALLER: ${{ runner.temp }}\propresenter-installer.exe
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:DOWNLOAD_URL)) {
+            throw "The OTA API did not return a downloadUrl"
+          }
+          pixi run python download_installer.py `
+            --url $env:DOWNLOAD_URL `
+            --output $env:INSTALLER
+
+      - name: Extract managed assemblies
+        shell: pwsh
+        env:
+          INSTALLER: ${{ runner.temp }}\propresenter-installer.exe
+        run: |
+          $ErrorActionPreference = "Stop"
+          pixi run python extract_installer.py `
+            --installer $env:INSTALLER `
+            --output-dir extracted `
+            --innoextract tools\innoextract-win\innoextract.exe `
+            --allow-installer-run `
+            --installer-log extracted\installer-output.log
+
+      - name: Upload extraction diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extraction-diagnostics-${{ needs.detect.outputs.build_number }}
+          path: |
+            extracted
+            tools/innoextract-win/innoextract-release.json
+          if-no-files-found: ignore
+
+      - name: Apply deterministic managed patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pixi run patch -- `
+            --propresenter extracted\ProPresenter.dll `
+            --do extracted\ProPresenter.DO.dll `
+            --output-dir patch-artifacts\patched `
+            --backup-dir patch-artifacts\baseline
+
+      - name: Write release metadata
+        shell: pwsh
+        env:
+          BUILD_NUMBER: ${{ needs.detect.outputs.build_number }}
+          VERSION: ${{ needs.detect.outputs.version }}
+          DOWNLOAD_URL: ${{ needs.detect.outputs.download_url }}
+          INSTALLER: ${{ runner.temp }}\propresenter-installer.exe
+        run: |
+          $ErrorActionPreference = "Stop"
+          $metadata = [ordered]@{
+            buildNumber = [int]$env:BUILD_NUMBER
+            version = $env:VERSION
+            downloadUrl = $env:DOWNLOAD_URL
+            installerSha256 = (Get-FileHash -Algorithm SHA256 $env:INSTALLER).Hash.ToLowerInvariant()
+            generatedAtUtc = [DateTime]::UtcNow.ToString("o")
+            source = "ProCore.dll /pro/upgrade via MCP-derived API route"
+          }
+          $metadata | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 patch-artifacts\release-metadata.json
+          Copy-Item extracted\installer-output.log patch-artifacts\installer-output.log -ErrorAction SilentlyContinue
+          Copy-Item extracted\extraction-manifest.json patch-artifacts\extraction-manifest.json -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force patch-artifacts\release-payload | Out-Null
+          Copy-Item patch-artifacts\patched\*.dll patch-artifacts\release-payload
+          Copy-Item patch-artifacts\release-metadata.json patch-artifacts\release-payload
+          $hashes = Get-ChildItem -File patch-artifacts\release-payload |
+            ForEach-Object {
+              [ordered]@{ file = $_.Name; sha256 = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant() }
+            }
+          $hashes | ConvertTo-Json | Set-Content -Encoding utf8 patch-artifacts\release-payload\SHA256SUMS.json
+
+      - name: Upload patched artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: propresenter-patched-${{ needs.detect.outputs.build_number }}
+          path: patch-artifacts
+          if-no-files-found: error
+
+  release:
+    name: Publish the patched build
+    if: needs.detect.outputs.changed == 'true'
+    needs: [detect, patch]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download patched artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: propresenter-patched-${{ needs.detect.outputs.build_number }}
+          path: patch-artifacts
+
+      - name: Download probe state
+        uses: actions/download-artifact@v4
+        with:
+          name: ota-probe-${{ github.run_id }}
+          path: ota-probe
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: propresenter-${{ needs.detect.outputs.version }}-${{ needs.detect.outputs.build_number }}
+          name: ProPresenter ${{ needs.detect.outputs.version }} build ${{ needs.detect.outputs.build_number }}
+          generate_release_notes: true
+          files: patch-artifacts/release-payload/*
+
+      - name: Advance state after successful release
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ needs.detect.outputs.build_number }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p state
+          cp ota-probe/ota-next-state.json state/ota-state.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/ota-state.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: advance OTA state to ${VERSION} build ${BUILD_NUMBER}"
+          git push

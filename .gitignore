@@ -3,5 +3,6 @@
 .uv-cache/
 .pixi
 .venv/
+tools/innoextract-win/
 __pycache__/
 **/__pycache__/

@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from propres_patcher.user_agent import CHROME_USER_AGENT
+
 
 DEFAULT_DNLIB_VERSION = "4.5.0"
 DEFAULT_DNLIB_NUPKG_SHA256 = "63bc2f9579568204cc8b30fa9f6700a231bcf868a8032e09118887af3eafee58"
@@ -90,7 +92,7 @@ def resolve_dnlib(version: str, cache_dir: Path) -> Path:
         with tempfile.NamedTemporaryFile(dir=version_dir, delete=False) as temporary:
             temporary_path = Path(temporary.name)
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": "ProPresPatcher/0.1"})
+            request = urllib.request.Request(url, headers={"User-Agent": CHROME_USER_AGENT})
             with urllib.request.urlopen(request, timeout=90) as response, temporary_path.open("wb") as target:
                 shutil.copyfileobj(response, target)
             temporary_path.replace(package_path)

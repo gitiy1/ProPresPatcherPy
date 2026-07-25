@@ -94,3 +94,56 @@ pixi run patch -- `
   --do "C:\path\to\ProPresenter.DO.dll" `
   --output-dir "C:\path\to\output"
 ```
+
+## MCP-Derived OTA Probe
+
+The sample does not use the public download page as its update source. MCP
+analysis of `ProCore.dll` found the registration API base
+`https://api.renewedvision.com/v1.1` (with a staging equivalent) and the
+`/pro/upgrade` route. The request uses `platform=win32`, `osVersion`,
+`appVersion`, `buildNumber`, `includeNotes=0`, and `format`; the response
+contains `buildNumber`, `version`, `downloadUrl`, `channel`, `isBeta`, and
+`isAvailable`. The managed update path consumes that URL through
+`BuildInformation.DownloadUrl`.
+
+Run the lightweight, standard-library-only probe from the repository root:
+
+```bash
+python ota_probe.py \
+  --state-file state/ota-state.json \
+  --result-file ota-result.json \
+  --next-state-file ota-next-state.json
+```
+
+It uses conditional HTTP validators when the state file contains them, filters
+to production builds by default, refuses non-HTTPS download URLs, and reports
+`changed`, `build_number`, `version`, and `download_url`. It does not update
+the state file itself; the release job advances state only after publishing
+the patched artifacts. Use `--api-base` to select the sample's staging API or
+an internal competition endpoint, and `--allowed-download-host` to enforce a
+download host allowlist.
+
+The repository workflow at `.github/workflows/ota-patch-release.yml` separates
+detection, Windows installer extraction, deterministic patching, and release.
+The patch job runs only when the MCP-derived API reports a new build.
+Before extraction, `setup_innoextract.py` queries the latest release API for
+`UserUnknownFactor/innoextract_win`, selects its single ZIP asset, verifies the
+GitHub-provided SHA-256 digest, and caches the Windows executable under
+`tools/innoextract-win/` (ignored by git). The explicit fork is the first
+extractor, followed by a compatible system `innoextract`, 7z/7zz, and finally
+an explicit silent install into a temporary directory. Extraction diagnostics
+include the tool release metadata and `installer-output.log`. API probing,
+installer downloads, dnlib resolution, and the GitHub tool bootstrap all use
+the shared Chrome User-Agent in `propres_patcher/user_agent.py`.
+
+## Runner Choice
+
+The managed patch itself is portable: `dnlib`, Pythonnet, and the pixi-managed
+.NET 10 runtime can run on Linux or Windows. The workflow uses the standard
+`ubuntu-latest` runner for detection/release and `windows-latest` for the patch
+job. The current sample uses a newer Inno Setup loader than the installed
+`innoextract 1.9` parser understands; the Windows-only fork supports the
+sample's loader and is therefore preferred on `windows-latest`. Linux remains
+suitable when a compatible native Inno extractor is available, or for the
+managed patch after assemblies have already been extracted; no WPF execution
+is required during patch generation.
