@@ -1,0 +1,16 @@
+[workspace]
+name = "propres-patcher"
+version = "0.1.0"
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64"]
+
+[dependencies]
+dotnet-runtime = "==10.0.0"
+python = "3.12.*"
+pip = "*"
+
+[pypi-dependencies]
+pythonnet = "==3.0.5"
+
+[tasks]
+patch = "python -m propres_patcher"

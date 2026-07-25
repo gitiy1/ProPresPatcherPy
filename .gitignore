@@ -1,0 +1,7 @@
+.cache/
+.pixi-cache/
+.uv-cache/
+.pixi
+.venv/
+__pycache__/
+**/__pycache__/

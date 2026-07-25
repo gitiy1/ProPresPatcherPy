@@ -1,0 +1,11 @@
+[project]
+name = "propres-patcher"
+version = "0.1.0"
+description = "Portable Pythonnet patcher for the ProPresenter managed competition sample"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "pythonnet==3.0.5",
+]
+
+[tool.uv]
+package = false
