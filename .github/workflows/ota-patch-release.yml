@@ -64,7 +64,7 @@ jobs:
           if-no-files-found: error
 
   patch:
-    name: Extract and patch the new build
+    name: Extract, patch, and publish the new build
     if: needs.detect.outputs.changed == 'true'
     needs: detect
     runs-on: windows-latest
@@ -202,30 +202,6 @@ jobs:
             }
           $hashes | ConvertTo-Json | Set-Content -Encoding utf8 patch-artifacts\release-payload\SHA256SUMS.json
 
-      - name: Upload patched artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: propresenter-patched-${{ needs.detect.outputs.build_number }}
-          path: patch-artifacts
-          if-no-files-found: error
-
-  release:
-    name: Publish the patched build
-    if: needs.detect.outputs.changed == 'true'
-    needs: [detect, patch]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Download patched artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: propresenter-patched-${{ needs.detect.outputs.build_number }}
-          path: patch-artifacts
-
       - name: Download probe state
         uses: actions/download-artifact@v8
         with:
@@ -233,15 +209,20 @@ jobs:
           path: ota-probe
 
       - name: Package patched payload
-        shell: bash
+        shell: pwsh
         env:
           BUILD_NUMBER: ${{ needs.detect.outputs.build_number }}
           VERSION: ${{ needs.detect.outputs.version }}
         run: |
-          set -euo pipefail
-          zip_name="ProPresenter-${VERSION}-${BUILD_NUMBER}-patched.zip"
-          (cd patch-artifacts/release-payload && zip -q -j "../${zip_name}" ./*)
-          printf 'Created %s\n' "patch-artifacts/${zip_name}"
+          $ErrorActionPreference = "Stop"
+          $zipName = "ProPresPatcher-Result-$env:VERSION-$env:BUILD_NUMBER.zip"
+          $zipPath = Join-Path "patch-artifacts" $zipName
+          $payloadFiles = Get-ChildItem -File patch-artifacts\release-payload
+          if ($payloadFiles.Count -eq 0) {
+            throw "The release payload is empty"
+          }
+          Compress-Archive -Path $payloadFiles.FullName -DestinationPath $zipPath -CompressionLevel Optimal
+          Write-Host "Created $zipPath"
 
       - name: Publish release
         uses: softprops/action-gh-release@v3
@@ -252,19 +233,26 @@ jobs:
           files: patch-artifacts/*.zip
 
       - name: Advance state after successful release
-        shell: bash
+        shell: pwsh
         env:
           BUILD_NUMBER: ${{ needs.detect.outputs.build_number }}
           VERSION: ${{ needs.detect.outputs.version }}
         run: |
-          set -euo pipefail
-          mkdir -p state
-          cp ota-probe/ota-next-state.json state/ota-state.json
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force state | Out-Null
+          Copy-Item ota-probe\ota-next-state.json state\ota-state.json -Force
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add state/ota-state.json
-          if git diff --cached --quiet; then
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
             exit 0
-          fi
-          git commit -m "chore: advance OTA state to ${VERSION} build ${BUILD_NUMBER}"
+          }
+          git commit -m "chore: advance OTA state to $env:VERSION build $env:BUILD_NUMBER"
+          if ($LASTEXITCODE -ne 0) {
+            throw "git commit failed with exit code $LASTEXITCODE"
+          }
           git push
+          if ($LASTEXITCODE -ne 0) {
+            throw "git push failed with exit code $LASTEXITCODE"
+          }

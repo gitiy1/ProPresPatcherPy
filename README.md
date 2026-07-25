@@ -118,14 +118,16 @@ python ota_probe.py \
 It uses conditional HTTP validators when the state file contains them, filters
 to production builds by default, refuses non-HTTPS download URLs, and reports
 `changed`, `build_number`, `version`, and `download_url`. It does not update
-the state file itself; the release job advances state only after publishing
+the state file itself; the Windows release step advances state only after publishing
 the patched artifacts. Use `--api-base` to select the sample's staging API or
 an internal competition endpoint, and `--allowed-download-host` to enforce a
 download host allowlist.
 
 The repository workflow at `.github/workflows/ota-patch-release.yml` separates
-detection, Windows installer extraction, deterministic patching, and release.
-The patch job runs only when the MCP-derived API reports a new build.
+detection from the Windows extraction, deterministic patching, packaging, and
+release work. The Windows job runs only when the MCP-derived API reports a new
+build and performs patching and publishing on the same runner, avoiding a
+second artifact transfer for the patched payload.
 Before extraction, `setup_innoextract.py` queries the latest release API for
 `UserUnknownFactor/innoextract_win`, selects its single ZIP asset, verifies the
 GitHub-provided SHA-256 digest, and caches the Windows executable under
@@ -137,16 +139,17 @@ include the tool release metadata, `innoextract-version.txt`,
 installer tree is intentionally not uploaded. API probing,
 installer downloads, dnlib resolution, and the GitHub tool bootstrap all use
 the shared Chrome User-Agent in `propres_patcher/user_agent.py`.
-The release job packages the patched DLLs, metadata, and `SHA256SUMS.json`
-into one versioned `ProPresenter-<version>-<build>-patched.zip` and publishes
+The Windows release step packages the patched DLLs, metadata, and `SHA256SUMS.json`
+into one versioned `ProPresPatcher-Result-<version>-<build>.zip` and publishes
 only that ZIP; GitHub Release provides the archive-level digest.
 
 ## Runner Choice
 
 The managed patch itself is portable: `dnlib`, Pythonnet, and the pixi-managed
 .NET 10 runtime can run on Linux or Windows. The workflow uses the standard
-`ubuntu-latest` runner for detection/release and `windows-latest` for the patch
-job. The current sample uses a newer Inno Setup loader than the installed
+`ubuntu-latest` runner only for lightweight detection and `windows-latest` for
+extraction, patching, packaging, and publishing. The current sample uses a newer
+Inno Setup loader than the installed
 `innoextract 1.9` parser understands; the Windows-only fork supports the
 sample's loader and is therefore preferred on `windows-latest`. Linux remains
 suitable when a compatible native Inno extractor is available, or for the
