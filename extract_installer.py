@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -52,7 +53,11 @@ def run_capture(command: list[str], log_file: Path | None = None) -> subprocess.
     result = subprocess.run(command, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        log_file.write_text(result.stdout, encoding="utf-8", errors="replace")
+        with log_file.open("a", encoding="utf-8", errors="replace") as stream:
+            stream.write(f"$ {shlex.join(command)}\n")
+            stream.write(result.stdout)
+            if result.stdout and not result.stdout.endswith("\n"):
+                stream.write("\n")
     if result.returncode != 0 and result.stdout:
         print(result.stdout[-4000:], file=sys.stderr)
     return result

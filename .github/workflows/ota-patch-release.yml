@@ -23,7 +23,7 @@ jobs:
       download_url: ${{ steps.probe.outputs.download_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Probe the discovered OTA API
         id: probe
@@ -55,7 +55,7 @@ jobs:
           python3 ota_probe.py "${args[@]}"
 
       - name: Preserve probe metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ota-probe-${{ github.run_id }}
           path: |
@@ -70,10 +70,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Pixi
-        uses: prefix-dev/setup-pixi@v0.9.6
+        uses: prefix-dev/setup-pixi@v0.10.0
         with:
           pixi-version: v0.70.2
           cache: true
@@ -112,14 +112,55 @@ jobs:
             --allow-installer-run `
             --installer-log extracted\installer-output.log
 
+      - name: Prepare extraction diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $diagnostics = "extraction-diagnostics"
+          New-Item -ItemType Directory -Force $diagnostics | Out-Null
+
+          $files = @(
+            "extracted\installer-output.log",
+            "extracted\extraction-manifest.json",
+            "tools\innoextract-win\innoextract-release.json"
+          )
+          foreach ($file in $files) {
+            if (Test-Path $file -PathType Leaf) {
+              Copy-Item $file $diagnostics -Force
+            }
+          }
+
+          $versionPath = Join-Path $diagnostics "innoextract-version.txt"
+          $innoextract = "tools\innoextract-win\innoextract.exe"
+          if (Test-Path $innoextract -PathType Leaf) {
+            & $innoextract --version *>&1 | Out-File -FilePath $versionPath -Encoding utf8
+          }
+
+          $targetSummaries = @()
+          foreach ($target in @("ProPresenter.dll", "ProPresenter.DO.dll")) {
+            $item = Get-ChildItem -Path extracted -Filter $target -File -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($null -ne $item) {
+              $targetSummaries += [ordered]@{
+                name = $item.Name
+                path = $item.FullName
+                size = $item.Length
+                sha256 = (Get-FileHash -Algorithm SHA256 $item.FullName).Hash.ToLowerInvariant()
+              }
+            }
+          }
+          [ordered]@{
+            extractionDirectoryPresent = (Test-Path extracted -PathType Container)
+            targetAssemblies = $targetSummaries
+          } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $diagnostics\extraction-summary.json
+
       - name: Upload extraction diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: extraction-diagnostics-${{ needs.detect.outputs.build_number }}
-          path: |
-            extracted
-            tools/innoextract-win/innoextract-release.json
+          path: extraction-diagnostics
           if-no-files-found: ignore
 
       - name: Apply deterministic managed patch
@@ -162,7 +203,7 @@ jobs:
           $hashes | ConvertTo-Json | Set-Content -Encoding utf8 patch-artifacts\release-payload\SHA256SUMS.json
 
       - name: Upload patched artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: propresenter-patched-${{ needs.detect.outputs.build_number }}
           path: patch-artifacts
@@ -177,27 +218,38 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download patched artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: propresenter-patched-${{ needs.detect.outputs.build_number }}
           path: patch-artifacts
 
       - name: Download probe state
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ota-probe-${{ github.run_id }}
           path: ota-probe
 
+      - name: Package patched payload
+        shell: bash
+        env:
+          BUILD_NUMBER: ${{ needs.detect.outputs.build_number }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          zip_name="ProPresenter-${VERSION}-${BUILD_NUMBER}-patched.zip"
+          (cd patch-artifacts/release-payload && zip -q -j "../${zip_name}" ./*)
+          printf 'Created %s\n' "patch-artifacts/${zip_name}"
+
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: propresenter-${{ needs.detect.outputs.version }}-${{ needs.detect.outputs.build_number }}
           name: ProPresenter ${{ needs.detect.outputs.version }} build ${{ needs.detect.outputs.build_number }}
           generate_release_notes: true
-          files: patch-artifacts/release-payload/*
+          files: patch-artifacts/*.zip
 
       - name: Advance state after successful release
         shell: bash

@@ -132,9 +132,14 @@ GitHub-provided SHA-256 digest, and caches the Windows executable under
 `tools/innoextract-win/` (ignored by git). The explicit fork is the first
 extractor, followed by a compatible system `innoextract`, 7z/7zz, and finally
 an explicit silent install into a temporary directory. Extraction diagnostics
-include the tool release metadata and `installer-output.log`. API probing,
+include the tool release metadata, `innoextract-version.txt`,
+`extraction-summary.json`, and `installer-output.log`; the full extracted
+installer tree is intentionally not uploaded. API probing,
 installer downloads, dnlib resolution, and the GitHub tool bootstrap all use
 the shared Chrome User-Agent in `propres_patcher/user_agent.py`.
+The release job packages the patched DLLs, metadata, and `SHA256SUMS.json`
+into one versioned `ProPresenter-<version>-<build>-patched.zip` and publishes
+only that ZIP; GitHub Release provides the archive-level digest.
 
 ## Runner Choice
 
